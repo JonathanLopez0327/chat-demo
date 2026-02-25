@@ -27,3 +27,5 @@ class ConversationState(TypedDict):
     error: Optional[str]
     # User description of the incident
     user_description: str
+    # Multimedia attachments accumulated during conversation
+    media_attachments: list[dict]  # [{bytes, filename, type, description}]

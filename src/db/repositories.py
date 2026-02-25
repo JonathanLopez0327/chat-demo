@@ -107,6 +107,35 @@ class IncidentRepository:
         self.conn.commit()
 
 
+class AttachmentRepository:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def save(
+        self,
+        incident_id: int,
+        file_path: str,
+        media_type: str,
+        original_name: str | None = None,
+        description: str | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO incident_attachments
+               (incident_id, file_path, media_type, original_name, description)
+               VALUES (?, ?, ?, ?, ?)""",
+            (incident_id, file_path, media_type, original_name, description),
+        )
+        self.conn.commit()
+        return cur.lastrowid  # type: ignore[return-value]
+
+    def get_by_incident(self, incident_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM incident_attachments WHERE incident_id = ? ORDER BY id",
+            (incident_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 class ConversationLogRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn

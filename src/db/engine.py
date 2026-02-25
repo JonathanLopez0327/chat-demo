@@ -52,6 +52,16 @@ CREATE TABLE IF NOT EXISTS conversation_log (
     content    TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
+
+CREATE TABLE IF NOT EXISTS incident_attachments (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id   INTEGER NOT NULL REFERENCES incidents(id),
+    file_path     TEXT NOT NULL,
+    media_type    TEXT NOT NULL,
+    original_name TEXT,
+    description   TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
 """
 
 

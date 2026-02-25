@@ -17,7 +17,7 @@ from langgraph.types import interrupt
 from src.catalog.parser import load_catalog_text, parse_catalog
 from src.config import CATALOG_PATH, MODEL_NAME, MODEL_TEMPERATURE
 from src.db.engine import get_connection
-from src.db.repositories import IncidentRepository, UserRepository
+from src.db.repositories import AttachmentRepository, IncidentRepository, UserRepository
 from src.memory.user_memory import load_user_context
 from src.models import (
     Category,
@@ -68,6 +68,22 @@ _FIELD_MAP = {
 _catalog_templates = parse_catalog(CATALOG_PATH)
 _catalog_by_code = {t.code: t for t in _catalog_templates}
 _catalog_text = load_catalog_text(CATALOG_PATH)
+
+
+def _parse_input(raw: object) -> dict:
+    """Normalize interrupt input for backward compatibility.
+
+    - str  → {"text": raw, "media": []}          (Studio / plain text)
+    - dict → expects {"text": ..., "media": [...]}  (WhatsApp adapter)
+    """
+    if isinstance(raw, str):
+        return {"text": raw, "media": []}
+    if isinstance(raw, dict):
+        return {
+            "text": raw.get("text", ""),
+            "media": raw.get("media", []),
+        }
+    return {"text": str(raw), "media": []}
 
 
 # ─── Greeting ──────────────────────────────────────────────────────────
@@ -126,7 +142,7 @@ def register_user_node(state: dict) -> dict:
     """Interrupt to get user's name, extract profile, save to DB."""
     phone = state.get("user_phone", "")
 
-    name_input = interrupt("Esperando nombre del usuario")
+    name_input = _parse_input(interrupt("Esperando nombre del usuario"))["text"]
 
     extraction_prompt = (
         "Del siguiente mensaje del usuario, extrae su nombre. "
@@ -188,11 +204,35 @@ def register_user_node(state: dict) -> dict:
 # ─── Collect Description ──────────────────────────────────────────────
 
 def collect_description_node(state: dict) -> dict:
-    """Interrupt to get the free-text incident description."""
-    description = interrupt("Esperando descripción del incidente")
+    """Interrupt to get the free-text incident description.
+
+    Supports multimedia input: if the adapter sends a dict with media
+    (image descriptions, audio transcriptions), they are concatenated
+    to the text description.
+    """
+    raw = interrupt("Esperando descripción del incidente")
+    parsed = _parse_input(raw)
+
+    description = parsed["text"]
+    media_attachments = list(state.get("media_attachments", []))
+
+    # Append media descriptions to the text
+    extra_parts: list[str] = []
+    for m in parsed.get("media", []):
+        if m.get("type") == "image" and m.get("description"):
+            extra_parts.append(f"[Descripción visual: {m['description']}]")
+        if m.get("type") == "audio" and m.get("description"):
+            extra_parts.append(f"[Transcripción de audio: {m['description']}]")
+        media_attachments.append(m)
+
+    if extra_parts:
+        description = (description + "\n" + "\n".join(extra_parts)).strip()
+
+    display_text = parsed["text"] or description
     return {
-        "messages": [HumanMessage(content=description)],
+        "messages": [HumanMessage(content=display_text)],
         "user_description": description,
+        "media_attachments": media_attachments,
         "current_node": "collect_description",
     }
 
@@ -238,7 +278,7 @@ def confirm_classification_node(state: dict) -> dict:
     """Interrupt for user selection, then fill incident from catalog."""
     candidates = state.get("classification_candidates", [])
 
-    selection = interrupt("Esperando selección (1-3 o ninguno)")
+    selection = _parse_input(interrupt("Esperando selección (1-3 o ninguno)"))["text"]
 
     sel = selection.strip().lower()
     selected = None
@@ -345,7 +385,7 @@ def collect_fields_node(state: dict) -> dict:
     if field_info.get("example"):
         question += f"\n   (Ejemplo: {field_info['example']})"
 
-    answer = interrupt(question)
+    answer = _parse_input(interrupt(question))["text"]
 
     incident[next_field] = answer.strip()
     remaining = missing[1:]
@@ -403,7 +443,7 @@ def confirmation_node(state: dict) -> dict:
 
 def process_confirmation_node(state: dict) -> dict:
     """Interrupt to get confirm / edit / cancel."""
-    response = interrupt("Esperando confirmación (1=confirmar, 2=editar, 3=cancelar)")
+    response = _parse_input(interrupt("Esperando confirmación (1=confirmar, 2=editar, 3=cancelar)"))["text"]
     resp_lower = response.strip().lower()
 
     affirm = any(w in resp_lower for w in ("sí", "si", "confirmo", "confirmar", "guardar", "ok", "1", "correcto"))
@@ -439,7 +479,7 @@ def process_confirmation_node(state: dict) -> dict:
 
 def edit_node(state: dict) -> dict:
     """Interrupt to ask which field to edit, then route to collect_fields."""
-    field_input = interrupt("Esperando campo a editar")
+    field_input = _parse_input(interrupt("Esperando campo a editar"))["text"]
 
     field = _FIELD_MAP.get(field_input.strip().lower())
     if field:
@@ -496,6 +536,21 @@ def save_node(state: dict) -> dict:
     conn = get_connection()
     repo = IncidentRepository(conn)
     incident_id = repo.save(record)
+
+    # Save multimedia attachments
+    media_attachments = state.get("media_attachments", [])
+    if media_attachments:
+        attach_repo = AttachmentRepository(conn)
+        for att in media_attachments:
+            file_path = att.get("file_path", "")
+            if file_path:
+                attach_repo.save(
+                    incident_id=incident_id,
+                    file_path=file_path,
+                    media_type=att.get("type", "unknown"),
+                    original_name=att.get("filename", ""),
+                    description=att.get("description", ""),
+                )
 
     profile_data = state.get("user_profile")
     if profile_data:
