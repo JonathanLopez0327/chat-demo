@@ -1,0 +1,24 @@
+A continuación se presenta el catálogo completo de incidentes de la fábrica:
+
+{{ catalog_text }}
+
+---
+
+El operador describió el siguiente problema:
+"{{ user_description }}"
+
+Analiza la descripción y selecciona los 3 incidentes del catálogo que mejor coinciden.
+
+Responde ÚNICAMENTE con un JSON válido (sin markdown, sin texto adicional) con esta estructura:
+{
+  "candidates": [
+    {
+      "code": "XXX-NNN",
+      "name": "Nombre del incidente",
+      "confidence": 0.95,
+      "reason": "Breve explicación de por qué coincide"
+    }
+  ]
+}
+
+Ordena por confianza descendente. Los valores de confidence deben estar entre 0 y 1.

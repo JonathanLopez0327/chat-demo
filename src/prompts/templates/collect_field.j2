@@ -1,0 +1,11 @@
+Necesitas recopilar el siguiente dato para completar el reporte de incidente:
+
+Campo: {{ field_name }}
+Descripción: {{ field_description }}
+{% if field_format %}Formato esperado: {{ field_format }}{% endif %}
+{% if field_example %}Ejemplo: {{ field_example }}{% endif %}
+{% if current_value %}Valor actual: {{ current_value }}{% endif %}
+
+Formula una pregunta breve y clara al operador para obtener este dato.
+Si ya tienes un valor previo del perfil del usuario, sugiere confirmarlo.
+Responde solo con la pregunta, sin preámbulos.

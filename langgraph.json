@@ -1,0 +1,9 @@
+{
+    "dependencies": [
+        "."
+    ],
+    "graphs": {
+        "incident": "./src/graph/builder.py:agent"
+    },
+    "env": ".env"
+}

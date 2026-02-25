@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "skills": {
+    "langchain": {
+      "source": "davila7/claude-code-templates",
+      "sourceType": "github",
+      "computedHash": "35c093146e1c0147709a900eef682b79c1cbda35d895c967039c4bd646684cf2"
+    },
+    "langgraph-docs": {
+      "source": "langchain-ai/deepagents",
+      "sourceType": "github",
+      "computedHash": "36357163de1472e570655b85879e60c228d97329ed2600fc042a7ac87cf54a5d"
+    },
+    "uv-package-manager": {
+      "source": "sickn33/antigravity-awesome-skills",
+      "sourceType": "github",
+      "computedHash": "43cd7806cdd68b9f60410687128679ef5a24b4e6afb3298025a1db494c8b5e68"
+    }
+  }
+}

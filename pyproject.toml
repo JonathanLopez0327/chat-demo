@@ -1,0 +1,21 @@
+[project]
+name = "chat-demo"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "jinja2>=3.1.6",
+    "langchain>=1.2.10",
+    "langchain-openai>=1.1.10",
+    "langgraph>=1.0.9",
+    "langgraph-checkpoint-sqlite>=3.0.3",
+    "pydantic>=2.12.5",
+    "python-dotenv>=1.2.1",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+    "langgraph-cli[inmem]>=0.4.12",
+]
