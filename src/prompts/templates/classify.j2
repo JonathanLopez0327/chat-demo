@@ -1,10 +1,10 @@
-A continuación se presenta el catálogo completo de incidentes de la fábrica:
+A continuación se presenta el catálogo completo de incidentes de agencias de lotería:
 
 {{ catalog_text }}
 
 ---
 
-El operador describió el siguiente problema:
+El operador de agencia describió el siguiente problema:
 "{{ user_description }}"
 
 Analiza la descripción y selecciona los 3 incidentes del catálogo que mejor coinciden.
@@ -20,5 +20,7 @@ Responde ÚNICAMENTE con un JSON válido (sin markdown, sin texto adicional) con
     }
   ]
 }
+
+Los códigos tienen el formato: POS-001, IMP-001, NET-001, ELE-001, EQU-001, INF-001, MAT-001, VEN-001, PAG-001, CON-001, FRA-001, REC-001, etc.
 
 Ordena por confianza descendente. Los valores de confidence deben estar entre 0 y 1.

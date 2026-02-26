@@ -1,11 +1,18 @@
-"""CRUD repositories for users, incidents, and conversation log."""
+"""CRUD repositories for users, incidents, conversation log, and conversations."""
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from datetime import datetime
 from typing import Optional
 
-from src.models import IncidentRecord, IncidentStatus, UserProfile
+from src.models import (
+    Conversation,
+    ConversationStatus,
+    IncidentRecord,
+    IncidentStatus,
+    UserProfile,
+)
 
 
 class UserRepository:
@@ -30,11 +37,11 @@ class UserRepository:
 
     def upsert(self, profile: UserProfile) -> None:
         self.conn.execute(
-            """INSERT INTO users (phone_number, name, area, shift, role, line, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO users (phone_number, name, area, shift, role, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(phone_number) DO UPDATE SET
                  name=excluded.name, area=excluded.area, shift=excluded.shift,
-                 role=excluded.role, line=excluded.line, updated_at=excluded.updated_at
+                 role=excluded.role, updated_at=excluded.updated_at
             """,
             (
                 profile.phone_number,
@@ -42,7 +49,6 @@ class UserRepository:
                 profile.area,
                 profile.shift,
                 profile.role,
-                profile.line,
                 profile.created_at.isoformat(),
                 datetime.now().isoformat(),
             ),
@@ -58,11 +64,10 @@ class IncidentRepository:
         cur = self.conn.execute(
             """INSERT INTO incidents
                (incident_code, incident_name, category, sub_category, severity,
-                date_time_reported, reported_by, plant, line, work_cell, shift,
-                machine, production_order, lot_number, description,
-                immediate_action, status, root_cause, corrective_action,
+                ticket_type, sla, date_time_reported, reported_by, agency,
+                shift, description, status, root_cause, corrective_action,
                 preventive_action, closed_by, closed_at, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 record.incident_code,
@@ -70,17 +75,13 @@ class IncidentRepository:
                 record.category.value,
                 record.sub_category,
                 record.severity.value,
+                record.ticket_type.value,
+                record.sla,
                 record.date_time_reported.isoformat(),
                 record.reported_by,
-                record.plant,
-                record.line,
-                record.work_cell,
+                record.agency,
                 record.shift,
-                record.machine,
-                record.production_order,
-                record.lot_number,
                 record.description,
-                record.immediate_action,
                 record.status.value,
                 record.root_cause,
                 record.corrective_action,
@@ -148,10 +149,16 @@ class ConversationLogRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
-    def append(self, thread_id: str, role: str, content: str) -> None:
+    def append(
+        self,
+        thread_id: str,
+        role: str,
+        content: str,
+        conversation_id: Optional[str] = None,
+    ) -> None:
         self.conn.execute(
-            "INSERT INTO conversation_log (thread_id, role, content) VALUES (?, ?, ?)",
-            (thread_id, role, content),
+            "INSERT INTO conversation_log (thread_id, role, content, conversation_id) VALUES (?, ?, ?, ?)",
+            (thread_id, role, content, conversation_id),
         )
         self.conn.commit()
 
@@ -166,5 +173,68 @@ class ConversationLogRepository:
         """Delete all conversation log entries for a thread."""
         self.conn.execute(
             "DELETE FROM conversation_log WHERE thread_id = ?", (thread_id,)
+        )
+        self.conn.commit()
+
+
+class ConversationRepository:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def create(self, thread_id: str) -> Conversation:
+        """Create a new conversation session and return it."""
+        conv = Conversation(id=str(uuid.uuid4()), thread_id=thread_id)
+        self.conn.execute(
+            """INSERT INTO conversations (id, thread_id, started_at, status, outcome, total_messages)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                conv.id,
+                conv.thread_id,
+                conv.started_at.isoformat(),
+                conv.status.value,
+                conv.outcome,
+                conv.total_messages,
+            ),
+        )
+        self.conn.commit()
+        return conv
+
+    def get_active(self, thread_id: str) -> Optional[Conversation]:
+        """Return the active conversation for a thread, if any."""
+        row = self.conn.execute(
+            "SELECT * FROM conversations WHERE thread_id = ? AND status = 'ACTIVE' ORDER BY started_at DESC LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return Conversation(**dict(row))
+
+    def finish(
+        self,
+        conversation_id: str,
+        status: ConversationStatus,
+        outcome: str = "",
+        incident_id: Optional[int] = None,
+    ) -> None:
+        """Mark a conversation as finished."""
+        self.conn.execute(
+            """UPDATE conversations
+               SET ended_at = ?, status = ?, outcome = ?, incident_id = COALESCE(?, incident_id)
+               WHERE id = ?""",
+            (
+                datetime.now().isoformat(),
+                status.value,
+                outcome,
+                incident_id,
+                conversation_id,
+            ),
+        )
+        self.conn.commit()
+
+    def increment_messages(self, conversation_id: str) -> None:
+        """Increment the total_messages counter by 1."""
+        self.conn.execute(
+            "UPDATE conversations SET total_messages = total_messages + 1 WHERE id = ?",
+            (conversation_id,),
         )
         self.conn.commit()

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-import uuid
 from typing import Any
 
 from langchain_core.messages import AIMessage
@@ -15,7 +14,12 @@ from langgraph.types import Command
 
 from src.config import CHECKPOINT_DB_PATH
 from src.db.engine import get_connection
-from src.db.repositories import ConversationLogRepository, UserRepository
+from src.db.repositories import (
+    ConversationLogRepository,
+    ConversationRepository,
+    UserRepository,
+)
+from src.models import ConversationStatus
 from src.graph.builder import build_graph
 from src.media.processor import (
     analyze_image,
@@ -78,6 +82,10 @@ class GraphAdapter:
         app_conn = get_connection()
 
         if cmd == "/reset":
+            conv_repo = ConversationRepository(app_conn)
+            active = conv_repo.get_active(thread_id)
+            if active:
+                conv_repo.finish(active.id, ConversationStatus.CANCELLED, outcome="Reset por usuario")
             self.reset_thread(thread_id)
             ConversationLogRepository(app_conn).delete_thread(thread_id)
             app_conn.close()
@@ -86,6 +94,10 @@ class GraphAdapter:
             )
 
         if cmd == "/borrar":
+            conv_repo = ConversationRepository(app_conn)
+            active = conv_repo.get_active(thread_id)
+            if active:
+                conv_repo.finish(active.id, ConversationStatus.CANCELLED, outcome="Borrado por usuario")
             self.reset_thread(thread_id)
             ConversationLogRepository(app_conn).delete_thread(thread_id)
             UserRepository(app_conn).delete(thread_id)
@@ -135,13 +147,26 @@ class GraphAdapter:
         # Build the input value (text + optional media)
         input_value = await self._build_input(msg)
 
+        # --- Conversation tracking setup ---
+        app_conn = get_connection()
+        conv_repo = ConversationRepository(app_conn)
+        log_repo = ConversationLogRepository(app_conn)
+
         if not self._is_thread_started(thread_id):
+            # First message → create a new conversation session
+            conversation = conv_repo.create(thread_id)
+
             # First message from this user → invoke from START
             result = self._graph.invoke(
                 {"user_phone": thread_id},
                 config=config,
             )
             self._known_threads[thread_id] = True
+
+            # Log the user message
+            user_text = input_value if isinstance(input_value, str) else input_value.get("text", "")
+            log_repo.append(thread_id, "user", user_text, conversation.id)
+            conv_repo.increment_messages(conversation.id)
 
             # Check what the graph is waiting for after greeting
             state = self._graph.get_state(config)
@@ -151,7 +176,11 @@ class GraphAdapter:
             # greeting response — don't feed it as input data
             text_part = input_value if isinstance(input_value, str) else input_value.get("text", "")
             if self._is_greeting(text_part):
-                return self._extract_reply(result)
+                reply = self._extract_reply(result)
+                log_repo.append(thread_id, "assistant", reply, conversation.id)
+                conv_repo.increment_messages(conversation.id)
+                app_conn.close()
+                return reply
 
             # The message has real content → resume immediately
             result = self._graph.invoke(
@@ -159,6 +188,16 @@ class GraphAdapter:
                 config=config,
             )
         else:
+            # Get or create conversation for this thread
+            conversation = conv_repo.get_active(thread_id)
+            if not conversation:
+                conversation = conv_repo.create(thread_id)
+
+            # Log the user message
+            user_text = input_value if isinstance(input_value, str) else input_value.get("text", "")
+            log_repo.append(thread_id, "user", user_text, conversation.id)
+            conv_repo.increment_messages(conversation.id)
+
             # Subsequent message → resume the paused graph
             result = self._graph.invoke(
                 Command(resume=input_value),
@@ -167,11 +206,22 @@ class GraphAdapter:
 
         reply = self._extract_reply(result)
 
-        # If the graph reached a terminal state, reset the thread
-        # so the next message starts a fresh conversation
+        # Log the assistant reply
+        log_repo.append(thread_id, "assistant", reply, conversation.id)
+        conv_repo.increment_messages(conversation.id)
+
+        # If the graph reached a terminal state, finish the conversation
         if self._is_thread_finished(thread_id):
             self._known_threads.pop(thread_id, None)
+            # Determine outcome from graph state
+            state = self._graph.get_state(config)
+            incident_id = (state.values or {}).get("incident_id") if state and state.values else None
+            if incident_id:
+                conv_repo.finish(conversation.id, ConversationStatus.COMPLETED, outcome="Incidente creado", incident_id=incident_id)
+            else:
+                conv_repo.finish(conversation.id, ConversationStatus.COMPLETED, outcome="Conversación completada")
 
+        app_conn.close()
         return reply
 
     # ── private helpers ─────────────────────────────────────────────

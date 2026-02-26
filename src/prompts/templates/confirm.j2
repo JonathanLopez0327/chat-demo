@@ -1,21 +1,17 @@
-Se ha recopilado la siguiente información para el reporte de incidente. Genera un resumen formateado para que el operador lo confirme.
+Se ha recopilado la siguiente información para el reporte. Genera un resumen formateado para que el operador lo confirme.
 
 Datos del incidente:
 - Código: {{ incident.incident_code }}
 - Nombre: {{ incident.incident_name }}
 - Categoría: {{ incident.category }}
+- Tipo de ticket: {{ incident.ticket_type }}
 - Severidad: {{ incident.severity }}
+- SLA: {{ incident.sla }}
 - Fecha/Hora: {{ incident.date_time_reported }}
 - Reportado por: {{ incident.reported_by }}
-- Planta: {{ incident.plant }}
-- Línea: {{ incident.line }}
-- Celda de trabajo: {{ incident.work_cell }}
+- Agencia: {{ incident.agency }}
 - Turno: {{ incident.shift }}
-{% if incident.machine %}- Máquina: {{ incident.machine }}{% endif %}
-{% if incident.lot_number %}- Número de lote: {{ incident.lot_number }}{% endif %}
-{% if incident.production_order %}- Orden de producción: {{ incident.production_order }}{% endif %}
 - Descripción: {{ incident.description }}
-- Acción inmediata: {{ incident.immediate_action }}
 - Estado: {{ incident.status }}
 
 Presenta este resumen de forma clara y pregunta al operador si desea:

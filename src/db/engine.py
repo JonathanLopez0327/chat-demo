@@ -13,7 +13,6 @@ CREATE TABLE IF NOT EXISTS users (
     area         TEXT DEFAULT '',
     shift        TEXT DEFAULT '',
     role         TEXT DEFAULT '',
-    line         TEXT DEFAULT '',
     created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     updated_at   TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -25,17 +24,13 @@ CREATE TABLE IF NOT EXISTS incidents (
     category           TEXT NOT NULL,
     sub_category       TEXT DEFAULT '',
     severity           TEXT NOT NULL,
+    ticket_type        TEXT NOT NULL DEFAULT 'Incidente',
+    sla                TEXT DEFAULT '',
     date_time_reported TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     reported_by        TEXT NOT NULL REFERENCES users(phone_number),
-    plant              TEXT DEFAULT '',
-    line               TEXT DEFAULT '',
-    work_cell          TEXT DEFAULT '',
+    agency             TEXT DEFAULT '',
     shift              TEXT DEFAULT '',
-    machine            TEXT,
-    production_order   TEXT,
-    lot_number         TEXT,
     description        TEXT DEFAULT '',
-    immediate_action   TEXT DEFAULT '',
     status             TEXT NOT NULL DEFAULT 'OPEN',
     root_cause         TEXT,
     corrective_action  TEXT,
@@ -45,12 +40,24 @@ CREATE TABLE IF NOT EXISTS incidents (
     created_at         TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS conversations (
+    id              TEXT PRIMARY KEY,
+    thread_id       TEXT NOT NULL,
+    started_at      TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    ended_at        TEXT,
+    status          TEXT NOT NULL DEFAULT 'ACTIVE',
+    outcome         TEXT DEFAULT '',
+    incident_id     INTEGER REFERENCES incidents(id),
+    total_messages  INTEGER DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS conversation_log (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    thread_id  TEXT NOT NULL,
-    role       TEXT NOT NULL,
-    content    TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id       TEXT NOT NULL,
+    role            TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    conversation_id TEXT REFERENCES conversations(id),
+    created_at      TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS incident_attachments (
@@ -74,7 +81,22 @@ def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     return conn
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Apply lightweight migrations for existing databases."""
+    # Add conversation_id column to conversation_log if missing
+    cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(conversation_log)").fetchall()
+    }
+    if "conversation_id" not in cols:
+        conn.execute(
+            "ALTER TABLE conversation_log ADD COLUMN conversation_id TEXT REFERENCES conversations(id)"
+        )
+        conn.commit()
+
+
 def init_db(db_path: Path | str | None = None) -> None:
     conn = get_connection(db_path)
     conn.executescript(_DDL)
+    _migrate(conn)
     conn.close()

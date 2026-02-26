@@ -24,6 +24,7 @@ from src.models import (
     IncidentRecord,
     IncidentStatus,
     Severity,
+    TicketType,
     UserProfile,
 )
 from src.prompts.loader import render
@@ -40,28 +41,13 @@ def _get_llm() -> ChatOpenAI:
 
 # Fields the operator must provide (beyond what the catalog auto-fills)
 REQUIRED_FIELDS: dict[str, dict] = {
-    "plant": {"description": "¿En qué planta fue?", "example": "Planta Norte"},
-    "line": {"description": "¿En qué línea?", "example": "Línea 1"},
-    "work_cell": {"description": "¿En qué celda o estación?", "example": "Estación de empaque"},
-    "shift": {"description": "¿Qué turno?", "example": "Mañana, Tarde o Noche"},
-    "description": {"description": "Dame más detalle de lo que pasó", "example": "Se atascaron huevos en la curva de la banda 3"},
-}
-
-OPTIONAL_FIELDS: dict[str, dict] = {
-    "machine": {"description": "¿Qué máquina? (si aplica)", "example": "Clasificadora MOBA"},
-    "lot_number": {"description": "¿Número de lote? (si aplica)", "example": "LOT-20260224-001"},
-    "production_order": {"description": "¿Orden de producción? (si aplica)", "example": "OP-2026-0451"},
+    "agency": {"description": "¿En qué agencia fue?", "example": "Agencia Centro 12"},
+    "description": {"description": "Dame más detalle de lo que pasó", "example": "La terminal no enciende desde la mañana, ya probé reiniciarla"},
 }
 
 _FIELD_MAP = {
-    "planta": "plant", "plant": "plant",
-    "línea": "line", "linea": "line", "line": "line",
-    "celda": "work_cell", "work_cell": "work_cell",
-    "turno": "shift", "shift": "shift",
-    "descripción": "description", "descripcion": "description",
-    "máquina": "machine", "maquina": "machine",
-    "lote": "lot_number", "lot": "lot_number",
-    "orden": "production_order",
+    "agencia": "agency", "agency": "agency",
+    "descripción": "description", "descripcion": "description", "description": "description",
 }
 
 # Catalog loaded once at import
@@ -123,7 +109,6 @@ def greeting_node(state: dict) -> dict:
             "awaiting_input": "incident_description",
             "current_incident": {
                 "reported_by": phone,
-                "line": profile.line or "",
                 "shift": profile.shift or "",
             },
         }
@@ -133,7 +118,7 @@ def greeting_node(state: dict) -> dict:
             "messages": [
                 SystemMessage(content=system_prompt),
                 AIMessage(
-                    content="Hola, soy el asistente de planta. "
+                    content="Hola, soy el asistente de soporte para agencias. "
                     "Te ayudo a reportar incidentes de forma rápida.\n\n"
                     "No te tengo registrado aún. ¿Cómo te llamas?"
                 ),
@@ -157,13 +142,13 @@ def register_user_node(state: dict) -> dict:
         "Del siguiente mensaje del usuario, extrae ÚNICAMENTE su nombre propio "
         "(nombre y apellido si los da). No incluyas frases como 'mi nombre es', "
         "'me llamo', 'soy', etc. Solo el nombre limpio.\n"
-        "Si también menciona área, turno, línea o rol, extráelos.\n"
+        "Si también menciona área, turno o rol, extráelos.\n"
         f'Mensaje: "{name_input}"\n'
         "Ejemplos:\n"
         '  "Mi nombre es Juan Pérez" → {"name": "Juan Pérez", ...}\n'
         '  "Soy María" → {"name": "María", ...}\n'
-        '  "Pedro, de la línea 2, turno mañana" → {"name": "Pedro", "line": "Línea 2", "shift": "Mañana", ...}\n'
-        'Responde SOLO con JSON: {"name": "...", "area": "...", "shift": "...", "line": "...", "role": "..."}\n'
+        '  "Pedro, de la agencia centro, turno mañana" → {"name": "Pedro", "area": "Agencia Centro", "shift": "Mañana", ...}\n'
+        'Responde SOLO con JSON: {"name": "...", "area": "...", "shift": "...", "role": "..."}\n'
         "Usa string vacío para campos no mencionados."
     )
     resp = _get_llm().invoke([HumanMessage(content=extraction_prompt)])
@@ -196,7 +181,6 @@ def register_user_node(state: dict) -> dict:
         name=name,
         area=extracted.get("area", ""),
         shift=extracted.get("shift", ""),
-        line=extracted.get("line", ""),
         role=extracted.get("role", ""),
     )
 
@@ -206,8 +190,6 @@ def register_user_node(state: dict) -> dict:
 
     incident = dict(state.get("current_incident", {}))
     incident["reported_by"] = phone
-    if profile.line:
-        incident["line"] = profile.line
     if profile.shift:
         incident["shift"] = profile.shift
 
@@ -377,7 +359,8 @@ def confirm_classification_node(state: dict) -> dict:
         "category": template.category.value,
         "sub_category": template.sub_category,
         "severity": template.severity.value,
-        "immediate_action": template.immediate_action,
+        "ticket_type": template.ticket_type.value,
+        "sla": template.sla,
         "description": state.get("user_description", ""),
     })
 
@@ -389,7 +372,7 @@ def confirm_classification_node(state: dict) -> dict:
             HumanMessage(content=selection),
             AIMessage(
                 content=f"Perfecto: *{template.code}* – {template.name}\n"
-                f"Severidad: {template.severity.value}\n\n"
+                f"Tipo: {template.ticket_type.value} · Severidad: {template.severity.value} · SLA: {template.sla}\n\n"
                 "Necesito unos datos más para completar el reporte."
             ),
         ],
@@ -424,13 +407,11 @@ def collect_fields_node(state: dict) -> dict:
         }
 
     # Determine the field we are about to ask for.
-    # If current_field is already set (from a previous node or loop iteration),
-    # honour it; otherwise pick the first missing field.
     target_field = state.get("current_field") or missing[0]
     if target_field not in missing:
         target_field = missing[0]
 
-    field_info = REQUIRED_FIELDS.get(target_field, OPTIONAL_FIELDS.get(target_field, {}))
+    field_info = REQUIRED_FIELDS.get(target_field, {})
 
     question = field_info.get("description", target_field)
     if field_info.get("example"):
@@ -470,18 +451,11 @@ def confirmation_node(state: dict) -> dict:
     lines = [
         "Listo, este es el resumen:\n",
         f"*{incident.get('incident_code', '')}* – {incident.get('incident_name', '')}",
-        f"Severidad: {incident.get('severity', '')}",
-        f"Planta: {incident.get('plant', '')} · Línea: {incident.get('line', '')} · Celda: {incident.get('work_cell', '')}",
+        f"Tipo: {incident.get('ticket_type', 'Incidente')} · Severidad: {incident.get('severity', '')} · SLA: {incident.get('sla', '')}",
+        f"Agencia: {incident.get('agency', '')}",
         f"Turno: {incident.get('shift', '')}",
         f"Descripción: {incident.get('description', '')}",
-        f"Acción inmediata: {incident.get('immediate_action', '')}",
     ]
-    if incident.get("machine"):
-        lines.append(f"Máquina: {incident['machine']}")
-    if incident.get("lot_number"):
-        lines.append(f"Lote: {incident['lot_number']}")
-    if incident.get("production_order"):
-        lines.append(f"Orden: {incident['production_order']}")
 
     lines.append("\n¿Lo guardo así?\n1. Sí, guardar\n2. Quiero editar algo\n3. Cancelar")
 
@@ -516,7 +490,7 @@ def process_confirmation_node(state: dict) -> dict:
                 HumanMessage(content=response),
                 AIMessage(
                     content="Dale, ¿qué dato corrijo? "
-                    "(planta, línea, celda, turno, descripción, máquina, lote u orden)"
+                    "(agencia, descripción)"
                 ),
             ],
             "confirmed": False,
@@ -558,7 +532,7 @@ def edit_node(state: dict) -> dict:
             HumanMessage(content=field_input),
             AIMessage(
                 content="No ubico ese campo. "
-                "Dime: planta, línea, celda, turno, descripción, máquina, lote u orden."
+                "Dime: agencia o descripción."
             ),
         ],
         "current_node": "edit_retry",
@@ -576,19 +550,15 @@ def save_node(state: dict) -> dict:
         record = IncidentRecord(
             incident_code=incident_data.get("incident_code", ""),
             incident_name=incident_data.get("incident_name", ""),
-            category=Category(incident_data.get("category", "MEC")),
+            category=Category(incident_data.get("category", "POS")),
             sub_category=incident_data.get("sub_category", ""),
             severity=Severity(incident_data.get("severity", "MEDIUM")),
+            ticket_type=TicketType(incident_data.get("ticket_type", "Incidente")),
+            sla=incident_data.get("sla", ""),
             reported_by=incident_data.get("reported_by", ""),
-            plant=incident_data.get("plant", ""),
-            line=incident_data.get("line", ""),
-            work_cell=incident_data.get("work_cell", ""),
+            agency=incident_data.get("agency", ""),
             shift=incident_data.get("shift", ""),
-            machine=incident_data.get("machine"),
-            production_order=incident_data.get("production_order"),
-            lot_number=incident_data.get("lot_number"),
             description=incident_data.get("description", ""),
-            immediate_action=incident_data.get("immediate_action", ""),
             status=IncidentStatus.OPEN,
         )
     except Exception as e:
@@ -626,9 +596,6 @@ def save_node(state: dict) -> dict:
     if profile_data:
         profile = UserProfile(**profile_data)
         updated = False
-        if not profile.line and record.line:
-            profile.line = record.line
-            updated = True
         if not profile.shift and record.shift:
             profile.shift = record.shift
             updated = True
@@ -641,7 +608,7 @@ def save_node(state: dict) -> dict:
         "messages": [
             AIMessage(
                 content=f"Listo, quedó registrado con folio *{incident_id}*.\n"
-                f"{record.incident_code} – {record.incident_name} (Severidad: {record.severity.value})\n\n"
+                f"{record.incident_code} – {record.incident_name} ({record.ticket_type.value} · Severidad: {record.severity.value})\n\n"
                 "Ya lo tiene el equipo. Si pasa algo más, mándame mensaje."
             )
         ],

@@ -10,7 +10,7 @@ load_dotenv()
 # ── Paths ──────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
-CATALOG_PATH = PROJECT_ROOT / "catalog" / "incident_catalog.md"
+CATALOG_PATH = PROJECT_ROOT / "catalog" / "Incidentes.xlsx"
 DB_PATH = DATA_DIR / "chatbot.db"
 CHECKPOINT_DB_PATH = DATA_DIR / "checkpoints" / "langgraph.db"
 

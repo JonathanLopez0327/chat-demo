@@ -53,7 +53,7 @@ async def analyze_image(image_bytes: bytes, context: str = "") -> str:
 
     prompt = (
         "Describe lo que ves en esta imagen en el contexto de un reporte "
-        "de incidente industrial en una fábrica de huevos. "
+        "de incidente en una agencia de lotería y apuestas. "
         "Identifica daños, equipos, condiciones de seguridad o cualquier "
         "detalle relevante para el reporte."
     )
