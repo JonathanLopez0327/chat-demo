@@ -58,6 +58,17 @@ async def receive_message(
     return {"status": "ok"}
 
 
+@app.post("/reset/{phone_number}")
+async def reset_thread(phone_number: str) -> dict:
+    """Reset a user's conversation thread so the next message starts fresh.
+
+    Usage: POST /reset/5215512345678
+    """
+    adapter = _get_adapter()
+    adapter.reset_thread(phone_number)
+    return {"status": "ok", "phone": phone_number, "message": "Thread reset"}
+
+
 async def _process_message(msg) -> None:
     """Process a single incoming message in the background."""
     try:

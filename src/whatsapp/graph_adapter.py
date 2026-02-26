@@ -40,6 +40,28 @@ class GraphAdapter:
 
     # ── public API ──────────────────────────────────────────────────
 
+    def reset_thread(self, thread_id: str) -> None:
+        """Remove all checkpoint data for a thread, forcing a fresh start."""
+        self._known_threads.pop(thread_id, None)
+        # Delete checkpoints from SQLite directly
+        conn = self._checkpointer.conn
+        conn.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
+        conn.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
+        conn.commit()
+        logger.info("Thread %s reset", thread_id)
+
+    # Greeting / chitchat patterns that should NOT be treated as input data
+    _GREETING_PATTERNS = {
+        "hola", "hello", "hi", "hey", "buenos dias", "buenos días",
+        "buenas tardes", "buenas noches", "buenas", "buen dia", "buen día",
+        "que tal", "qué tal", "ola", "saludos", "holi", "holaa",
+    }
+
+    def _is_greeting(self, text: str) -> bool:
+        """Check if a message is just a greeting with no real content."""
+        normalized = text.strip().lower().rstrip("!.?,;")
+        return normalized in self._GREETING_PATTERNS
+
     async def handle_message(self, msg: IncomingMessage) -> str:
         """Process an incoming WhatsApp message and return the reply text."""
         thread_id = msg.from_number
@@ -58,7 +80,17 @@ class GraphAdapter:
             )
             self._known_threads[thread_id] = True
 
-            # The graph pauses at the first interrupt — now resume with input
+            # Check what the graph is waiting for after greeting
+            state = self._graph.get_state(config)
+            awaiting = (state.values or {}).get("awaiting_input", "")
+
+            # If the first message is a greeting, just return the
+            # greeting response — don't feed it as input data
+            text_part = input_value if isinstance(input_value, str) else input_value.get("text", "")
+            if self._is_greeting(text_part):
+                return self._extract_reply(result)
+
+            # The message has real content → resume immediately
             result = self._graph.invoke(
                 Command(resume=input_value),
                 config=config,
@@ -70,20 +102,42 @@ class GraphAdapter:
                 config=config,
             )
 
-        return self._extract_reply(result)
+        reply = self._extract_reply(result)
+
+        # If the graph reached a terminal state, reset the thread
+        # so the next message starts a fresh conversation
+        if self._is_thread_finished(thread_id):
+            self._known_threads.pop(thread_id, None)
+
+        return reply
 
     # ── private helpers ─────────────────────────────────────────────
 
+    _TERMINAL_NODES = {"saved", "cancelled", "error"}
+
+    def _is_thread_finished(self, thread_id: str) -> bool:
+        """Check if the graph has reached END (no more pending tasks)."""
+        config = {"configurable": {"thread_id": thread_id}}
+        state = self._graph.get_state(config)
+        if not state or not state.values:
+            return True
+        # Graph finished if there are no next tasks to execute
+        if not state.next:
+            return True
+        return False
+
     def _is_thread_started(self, thread_id: str) -> bool:
-        """Check if a thread already exists (has checkpoint state)."""
+        """Check if an active (non-finished) thread exists."""
         if thread_id in self._known_threads:
             return True
         # Check the checkpointer for existing state
         config = {"configurable": {"thread_id": thread_id}}
         state = self._graph.get_state(config)
         if state and state.values:
-            self._known_threads[thread_id] = True
-            return True
+            # Only consider it started if it hasn't finished
+            if state.next:
+                self._known_threads[thread_id] = True
+                return True
         return False
 
     async def _build_input(self, msg: IncomingMessage) -> str | dict:

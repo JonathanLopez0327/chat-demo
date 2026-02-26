@@ -24,6 +24,7 @@ class ConversationState(TypedDict):
     # Flow control
     confirmed: Optional[bool]
     current_node: str
+    awaiting_input: Optional[str]  # explicit label of expected input
     error: Optional[str]
     # User description of the incident
     user_description: str
