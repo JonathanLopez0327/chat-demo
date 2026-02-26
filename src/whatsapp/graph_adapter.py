@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from typing import Any
 
 from langchain_core.messages import AIMessage
@@ -17,6 +18,7 @@ from src.db.engine import get_connection
 from src.db.repositories import (
     ConversationLogRepository,
     ConversationRepository,
+    IncidentRepository,
     UserRepository,
 )
 from src.models import ConversationStatus
@@ -79,44 +81,17 @@ class GraphAdapter:
             return None
 
         cmd = stripped.split()[0]
-        app_conn = get_connection()
 
         if cmd == "/reset":
-            conv_repo = ConversationRepository(app_conn)
-            active = conv_repo.get_active(thread_id)
-            if active:
-                conv_repo.finish(active.id, ConversationStatus.CANCELLED, outcome="Reset por usuario")
-            self.reset_thread(thread_id)
-            ConversationLogRepository(app_conn).delete_thread(thread_id)
-            app_conn.close()
-            return (
-                "Conversación reiniciada. Puedes empezar de nuevo enviando un mensaje."
-            )
+            return self._exec_db_command(self._cmd_reset, thread_id)
 
         if cmd == "/borrar":
-            conv_repo = ConversationRepository(app_conn)
-            active = conv_repo.get_active(thread_id)
-            if active:
-                conv_repo.finish(active.id, ConversationStatus.CANCELLED, outcome="Borrado por usuario")
-            self.reset_thread(thread_id)
-            ConversationLogRepository(app_conn).delete_thread(thread_id)
-            UserRepository(app_conn).delete(thread_id)
-            app_conn.close()
-            return (
-                "Tu perfil y conversación han sido eliminados. "
-                "Si envías un nuevo mensaje, comenzarás desde cero."
-            )
+            return self._exec_db_command(self._cmd_borrar, thread_id)
 
         if cmd == "/eliminar_usuario":
-            UserRepository(app_conn).delete(thread_id)
-            app_conn.close()
-            return (
-                "Tu perfil ha sido eliminado de la base de datos. "
-                "La conversación actual sigue activa."
-            )
+            return self._exec_db_command(self._cmd_eliminar_usuario, thread_id)
 
         if cmd == "/ayuda":
-            app_conn.close()
             return (
                 "Comandos disponibles:\n"
                 "  /reset — Reiniciar la conversación actual\n"
@@ -125,11 +100,70 @@ class GraphAdapter:
                 "  /ayuda — Mostrar esta lista de comandos"
             )
 
-        app_conn.close()
         return (
             f"Comando desconocido: {cmd}\n"
             "Envía /ayuda para ver los comandos disponibles."
         )
+
+    # ── command implementations ────────────────────────────────────
+
+    def _cmd_reset(self, thread_id: str) -> str:
+        app_conn = get_connection()
+        try:
+            conv_repo = ConversationRepository(app_conn)
+            active = conv_repo.get_active(thread_id)
+            if active:
+                conv_repo.finish(active.id, ConversationStatus.CANCELLED, outcome="Reset por usuario")
+            self.reset_thread(thread_id)
+            ConversationLogRepository(app_conn).delete_thread(thread_id)
+        finally:
+            app_conn.close()
+        return "Conversación reiniciada. Puedes empezar de nuevo enviando un mensaje."
+
+    def _cmd_borrar(self, thread_id: str) -> str:
+        app_conn = get_connection()
+        try:
+            conv_repo = ConversationRepository(app_conn)
+            active = conv_repo.get_active(thread_id)
+            if active:
+                conv_repo.finish(active.id, ConversationStatus.CANCELLED, outcome="Borrado por usuario")
+            self.reset_thread(thread_id)
+            ConversationLogRepository(app_conn).delete_thread(thread_id)
+            IncidentRepository(app_conn).delete_by_user(thread_id)
+            UserRepository(app_conn).delete(thread_id)
+        finally:
+            app_conn.close()
+        return (
+            "Tu perfil y conversación han sido eliminados. "
+            "Si envías un nuevo mensaje, comenzarás desde cero."
+        )
+
+    def _cmd_eliminar_usuario(self, thread_id: str) -> str:
+        app_conn = get_connection()
+        try:
+            IncidentRepository(app_conn).delete_by_user(thread_id)
+            UserRepository(app_conn).delete(thread_id)
+        finally:
+            app_conn.close()
+        return (
+            "Tu perfil ha sido eliminado de la base de datos. "
+            "La conversación actual sigue activa."
+        )
+
+    @staticmethod
+    def _exec_db_command(fn, thread_id: str, max_retries: int = 3) -> str:
+        """Execute a DB-writing command with retries on lock errors."""
+        for attempt in range(max_retries):
+            try:
+                return fn(thread_id)
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc) and attempt < max_retries - 1:
+                    wait = 0.3 * (attempt + 1)
+                    logger.warning("DB locked on attempt %d, retrying in %.1fs…", attempt + 1, wait)
+                    time.sleep(wait)
+                else:
+                    raise
+        return "Error interno al procesar el comando. Intenta de nuevo."
 
     async def handle_message(self, msg: IncomingMessage) -> str:
         """Process an incoming WhatsApp message and return the reply text."""
@@ -167,10 +201,6 @@ class GraphAdapter:
             user_text = input_value if isinstance(input_value, str) else input_value.get("text", "")
             log_repo.append(thread_id, "user", user_text, conversation.id)
             conv_repo.increment_messages(conversation.id)
-
-            # Check what the graph is waiting for after greeting
-            state = self._graph.get_state(config)
-            awaiting = (state.values or {}).get("awaiting_input", "")
 
             # If the first message is a greeting, just return the
             # greeting response — don't feed it as input data
@@ -215,9 +245,9 @@ class GraphAdapter:
             self._known_threads.pop(thread_id, None)
             # Determine outcome from graph state
             state = self._graph.get_state(config)
-            incident_id = (state.values or {}).get("incident_id") if state and state.values else None
-            if incident_id:
-                conv_repo.finish(conversation.id, ConversationStatus.COMPLETED, outcome="Incidente creado", incident_id=incident_id)
+            current_node = (state.values or {}).get("current_node", "") if state and state.values else ""
+            if current_node == "saved":
+                conv_repo.finish(conversation.id, ConversationStatus.COMPLETED, outcome="Incidente creado")
             else:
                 conv_repo.finish(conversation.id, ConversationStatus.COMPLETED, outcome="Conversación completada")
 
@@ -226,15 +256,12 @@ class GraphAdapter:
 
     # ── private helpers ─────────────────────────────────────────────
 
-    _TERMINAL_NODES = {"saved", "cancelled", "error"}
-
     def _is_thread_finished(self, thread_id: str) -> bool:
         """Check if the graph has reached END (no more pending tasks)."""
         config = {"configurable": {"thread_id": thread_id}}
         state = self._graph.get_state(config)
         if not state or not state.values:
             return True
-        # Graph finished if there are no next tasks to execute
         if not state.next:
             return True
         return False
@@ -243,11 +270,9 @@ class GraphAdapter:
         """Check if an active (non-finished) thread exists."""
         if thread_id in self._known_threads:
             return True
-        # Check the checkpointer for existing state
         config = {"configurable": {"thread_id": thread_id}}
         state = self._graph.get_state(config)
         if state and state.values:
-            # Only consider it started if it hasn't finished
             if state.next:
                 self._known_threads[thread_id] = True
                 return True
@@ -267,7 +292,6 @@ class GraphAdapter:
                 audio_bytes, msg.mime_type or content_type
             )
             logger.info("Audio transcribed: %s...", transcription[:80])
-            # Use transcription as text if no caption
             text = msg.text or transcription
             media_items.append(
                 {

@@ -4,23 +4,40 @@ A continuación se presenta el catálogo completo de incidentes de agencias de l
 
 ---
 
-El operador de agencia describió el siguiente problema:
+El usuario (operador de agencia) describió el siguiente problema:
 "{{ user_description }}"
 
-Analiza la descripción y selecciona los 3 incidentes del catálogo que mejor coinciden.
+IMPORTANTE: Los usuarios escriben de forma informal, con errores de ortografía, jerga, abreviaciones y a veces frustrados. Ejemplos:
+- "la maquinita no jala" = terminal POS no funciona
+- "se fue la luz otra vez" = falla eléctrica
+- "no sirve nada" = falla general (usar contexto para determinar qué)
+- "la impresora no agarra papel" = problema de impresora
+- "el internet está de la chingada" = falla de conectividad
+- "no me deja cobrar" = problema con terminal de ventas/POS
+
+Interpreta el mensaje del usuario considerando este contexto y selecciona el ÚNICO incidente del catálogo que mejor coincide.
+
+REGLAS ESTRICTAS:
+1. El campo "code" DEBE ser uno de los códigos exactos que aparecen en el catálogo de arriba. NUNCA inventes, modifiques ni combines códigos.
+2. El campo "name" DEBE ser COPIA EXACTA del nombre del incidente en el catálogo. No lo parafrasees, resumas ni modifiques.
+3. Si NINGÚN incidente del catálogo coincide razonablemente con lo que describe el usuario, devuelve confidence menor a 0.5. Esto incluye situaciones que no tienen nada que ver con operaciones de agencia.
+4. NUNCA inventes incidentes, códigos o nombres que no existan textualmente en el catálogo.
+
+{% if valid_codes %}
+Los ÚNICOS códigos válidos son: {{ valid_codes }}
+Cualquier código fuera de esta lista es INVÁLIDO.
+{% endif %}
 
 Responde ÚNICAMENTE con un JSON válido (sin markdown, sin texto adicional) con esta estructura:
 {
-  "candidates": [
-    {
-      "code": "XXX-NNN",
-      "name": "Nombre del incidente",
-      "confidence": 0.95,
-      "reason": "Breve explicación de por qué coincide"
-    }
-  ]
+  "candidate": {
+    "code": "XXX-NNN",
+    "name": "Nombre EXACTO del catálogo",
+    "confidence": 0.95,
+    "reason": "Breve explicación de por qué coincide"
+  }
 }
 
 Los códigos tienen el formato: POS-001, IMP-001, NET-001, ELE-001, EQU-001, INF-001, MAT-001, VEN-001, PAG-001, CON-001, FRA-001, REC-001, etc.
 
-Ordena por confianza descendente. Los valores de confidence deben estar entre 0 y 1.
+El valor de confidence debe estar entre 0 y 1. Si no hay ningún incidente que coincida razonablemente, usa confidence menor a 0.5.

@@ -1,9 +1,10 @@
-"""LangGraph node functions for the incident reporting flow.
+"""LangGraph node functions for the simplified incident reporting flow.
 
-Nodes that need user input call ``interrupt()`` which pauses execution
-and returns control to the LangGraph Platform / Studio.  When the user
-responds (via ``Command(resume=value)``), the node resumes and processes
-the answer.
+4 nodes, 1 user interaction:
+1. greeting_node      — saludo genérico (no interrupt)
+2. collect_description — recibe descripción del usuario (interrupt)
+3. classify_node      — clasifica automáticamente con LLM (no interrupt)
+4. save_node          — guarda en BD (no interrupt)
 """
 from __future__ import annotations
 
@@ -16,16 +17,15 @@ from langgraph.types import interrupt
 
 from src.catalog.parser import load_catalog_text, parse_catalog
 from src.config import CATALOG_PATH, MODEL_NAME, MODEL_TEMPERATURE
+from src.content_safety import check_content_safety
 from src.db.engine import get_connection
 from src.db.repositories import AttachmentRepository, IncidentRepository, UserRepository
-from src.memory.user_memory import load_user_context
 from src.models import (
     Category,
     IncidentRecord,
     IncidentStatus,
     Severity,
     TicketType,
-    UserProfile,
 )
 from src.prompts.loader import render
 
@@ -38,17 +38,6 @@ def _get_llm() -> ChatOpenAI:
         _llm = ChatOpenAI(model=MODEL_NAME, temperature=MODEL_TEMPERATURE)
     return _llm
 
-
-# Fields the operator must provide (beyond what the catalog auto-fills)
-REQUIRED_FIELDS: dict[str, dict] = {
-    "agency": {"description": "¿En qué agencia fue?", "example": "Agencia Centro 12"},
-    "description": {"description": "Dame más detalle de lo que pasó", "example": "La terminal no enciende desde la mañana, ya probé reiniciarla"},
-}
-
-_FIELD_MAP = {
-    "agencia": "agency", "agency": "agency",
-    "descripción": "description", "descripcion": "description", "description": "description",
-}
 
 # Catalog loaded once at import
 _catalog_templates = parse_catalog(CATALOG_PATH)
@@ -75,136 +64,22 @@ def _parse_input(raw: object) -> dict:
 # ─── Greeting ──────────────────────────────────────────────────────────
 
 def greeting_node(state: dict) -> dict:
-    """Identify user and greet. No interrupt — output only."""
-    phone = state.get("user_phone", "")
-    conn = get_connection()
-    profile, recent = load_user_context(conn, phone)
-    conn.close()
-
-    if profile and profile.name:
-        system_prompt = render(
-            "system.j2",
-            user_profile=profile,
-            recent_incidents=recent,
-        )
-        first_name = profile.name.split()[0]
-        greeting_text = f"Hola {first_name}, ¿cómo va el turno?"
-        if recent:
-            last = recent[0]
-            greeting_text += (
-                f"\nVi que el último reporte fue por *{last['incident_name']}*."
-            )
-        greeting_text += (
-            "\n\nCuéntame qué pasó y te ayudo a levantar el reporte. "
-            "Puedes escribirme, mandarme una foto o una nota de voz."
-        )
-
-        return {
-            "messages": [
-                SystemMessage(content=system_prompt),
-                AIMessage(content=greeting_text),
-            ],
-            "user_profile": profile.model_dump(),
-            "current_node": "greeting",
-            "awaiting_input": "incident_description",
-            "current_incident": {
-                "reported_by": phone,
-                "shift": profile.shift or "",
-            },
-        }
-    else:
-        system_prompt = render("system.j2", user_profile=None, recent_incidents=[])
-        return {
-            "messages": [
-                SystemMessage(content=system_prompt),
-                AIMessage(
-                    content="Hola, soy el asistente de soporte para agencias. "
-                    "Te ayudo a reportar incidentes de forma rápida.\n\n"
-                    "No te tengo registrado aún. ¿Cómo te llamas?"
-                ),
-            ],
-            "user_profile": None,
-            "current_node": "greeting_new",
-            "awaiting_input": "user_name",
-            "current_incident": {"reported_by": phone},
-        }
-
-
-# ─── Register User ────────────────────────────────────────────────────
-
-def register_user_node(state: dict) -> dict:
-    """Interrupt to get user's name, extract profile, save to DB."""
+    """Simple greeting. No user lookup, no interrupt."""
     phone = state.get("user_phone", "")
 
-    name_input = _parse_input(interrupt("Esperando nombre del usuario"))["text"]
-
-    extraction_prompt = (
-        "Del siguiente mensaje del usuario, extrae ÚNICAMENTE su nombre propio "
-        "(nombre y apellido si los da). No incluyas frases como 'mi nombre es', "
-        "'me llamo', 'soy', etc. Solo el nombre limpio.\n"
-        "Si también menciona área, turno o rol, extráelos.\n"
-        f'Mensaje: "{name_input}"\n'
-        "Ejemplos:\n"
-        '  "Mi nombre es Juan Pérez" → {"name": "Juan Pérez", ...}\n'
-        '  "Soy María" → {"name": "María", ...}\n'
-        '  "Pedro, de la agencia centro, turno mañana" → {"name": "Pedro", "area": "Agencia Centro", "shift": "Mañana", ...}\n'
-        'Responde SOLO con JSON: {"name": "...", "area": "...", "shift": "...", "role": "..."}\n'
-        "Usa string vacío para campos no mencionados."
+    system_prompt = render("system.j2", user_profile=None, recent_incidents=[])
+    greeting_text = (
+        "Hola, soy el asistente de soporte. "
+        "Cuéntame qué pasó — escríbeme, mándame una foto o una nota de voz."
     )
-    resp = _get_llm().invoke([HumanMessage(content=extraction_prompt)])
-    try:
-        extracted = json.loads(resp.content.strip())
-    except json.JSONDecodeError:
-        extracted = {"name": name_input.strip()}
-
-    name = extracted.get("name", "").strip()
-    # Clean up common prefixes the LLM might leave in
-    for prefix in ("mi nombre es ", "me llamo ", "soy "):
-        if name.lower().startswith(prefix):
-            name = name[len(prefix):]
-    name = name.strip().title()
-
-    if not name:
-        return {
-            "messages": [
-                HumanMessage(content=name_input),
-                AIMessage(
-                    content="No alcancé a captar tu nombre. ¿Cómo te llamas?"
-                ),
-            ],
-            "current_node": "greeting_new",
-            "awaiting_input": "user_name",
-        }
-
-    profile = UserProfile(
-        phone_number=phone,
-        name=name,
-        area=extracted.get("area", ""),
-        shift=extracted.get("shift", ""),
-        role=extracted.get("role", ""),
-    )
-
-    conn = get_connection()
-    UserRepository(conn).upsert(profile)
-    conn.close()
-
-    incident = dict(state.get("current_incident", {}))
-    incident["reported_by"] = phone
-    if profile.shift:
-        incident["shift"] = profile.shift
 
     return {
         "messages": [
-            HumanMessage(content=name_input),
-            AIMessage(
-                content=f"Listo {name}, ya te tengo registrado.\n\n"
-                "Cuéntame, ¿qué pasó? Puedes escribirme o mandarme una foto o nota de voz."
-            ),
+            SystemMessage(content=system_prompt),
+            AIMessage(content=greeting_text),
         ],
-        "user_profile": profile.model_dump(),
-        "current_node": "registered",
-        "awaiting_input": "incident_description",
-        "current_incident": incident,
+        "current_node": "greeting",
+        "current_incident": {"reported_by": phone},
     }
 
 
@@ -223,7 +98,6 @@ def collect_description_node(state: dict) -> dict:
     description = parsed["text"]
     media_attachments = list(state.get("media_attachments", []))
 
-    # Append media descriptions to the text
     extra_parts: list[str] = []
     for m in parsed.get("media", []):
         if m.get("type") == "image" and m.get("description"):
@@ -241,23 +115,79 @@ def collect_description_node(state: dict) -> dict:
         "user_description": description,
         "media_attachments": media_attachments,
         "current_node": "collect_description",
-        "awaiting_input": None,  # next node (classify) has no interrupt
     }
 
 
 # ─── Classify ─────────────────────────────────────────────────────────
 
 def classify_node(state: dict) -> dict:
-    """Send description + catalog to LLM, return top-3 candidates."""
-    user_desc = state.get("user_description", "")
+    """Classify automatically using LLM. Top-1 only, no user selection.
 
-    prompt = render("classify.j2", catalog_text=_catalog_text, user_description=user_desc)
+    Generates a summary and asks user to confirm.
+    If confidence < 0.5 or JSON parse fails → ask for more details (max 2 attempts).
+    After 2 failed attempts → reject as unhandled incident.
+    """
+    user_desc = state.get("user_description", "")
+    attempts = state.get("classify_attempts", 0) + 1
+
+    # Message shown when max retries are exhausted
+    _UNHANDLED_MSG = (
+        "No parece un incidente relacionado con los sistemas o equipos de la agencia.\n\n"
+        "Si necesitas reportar un problema técnico (computadoras, red, sistema de apuestas, etc.), "
+        "dime y te ayudo.\n\n"
+        "Si se trata de otro tipo de situación, puede que debas comunicarte con el área correspondiente."
+    )
+    _MAX_CLASSIFY_ATTEMPTS = 2
+
+    # ── Content Safety Check ──────────────────────────────────────
+    media_descriptions = [
+        m.get("description", "")
+        for m in state.get("media_attachments", [])
+        if m.get("description")
+    ]
+    safety_result = check_content_safety(user_desc, media_descriptions)
+
+    if not safety_result.is_safe:
+        if attempts >= _MAX_CLASSIFY_ATTEMPTS:
+            return {
+                "messages": [AIMessage(content=_UNHANDLED_MSG)],
+                "current_node": "unhandled",
+                "classify_attempts": attempts,
+            }
+        return {
+            "messages": [
+                AIMessage(
+                    content="Ese contenido no está relacionado con operaciones de agencia. "
+                    "¿Tienes algún problema con tu terminal, impresora o algún equipo? "
+                    "Cuéntame y te ayudo."
+                )
+            ],
+            "current_node": "classify_failed",
+            "classify_attempts": attempts,
+        }
+
+    # ── Classification ────────────────────────────────────────────
+    # Pass the explicit list of valid codes to the prompt
+    valid_codes = ", ".join(sorted(_catalog_by_code.keys()))
+    prompt = render(
+        "classify.j2",
+        catalog_text=_catalog_text,
+        user_description=user_desc,
+        valid_codes=valid_codes,
+    )
     resp = _get_llm().invoke([HumanMessage(content=prompt)])
 
     try:
         data = json.loads(resp.content.strip())
-        candidates = data.get("candidates", [])[:3]
-    except json.JSONDecodeError:
+        candidate = data.get("candidate", {})
+        confidence = candidate.get("confidence", 0)
+    except (json.JSONDecodeError, AttributeError):
+        if attempts >= _MAX_CLASSIFY_ATTEMPTS:
+            return {
+                "messages": [AIMessage(content=_UNHANDLED_MSG)],
+                "current_node": "unhandled",
+                "classify_attempts": attempts,
+            }
         return {
             "messages": [
                 AIMessage(
@@ -266,284 +196,76 @@ def classify_node(state: dict) -> dict:
                 )
             ],
             "current_node": "classify_failed",
-            "classification_candidates": [],
+            "classify_attempts": attempts,
         }
 
-    lines = ["Ok, esto podría ser:\n"]
-    for i, c in enumerate(candidates, 1):
-        lines.append(f"{i}. *{c['code']}* – {c['name']}")
-        reason = c.get("reason", "")
-        if reason:
-            lines.append(f"   _{reason}_\n")
-    lines.append("¿Cuál es? Dime el número, o *ninguno* si no aplica.")
-
-    return {
-        "messages": [AIMessage(content="\n".join(lines))],
-        "classification_candidates": candidates,
-        "current_node": "classify",
-        "awaiting_input": "classification_selection",
-    }
-
-
-# ─── Confirm Classification ───────────────────────────────────────────
-
-def confirm_classification_node(state: dict) -> dict:
-    """Interrupt for user selection, then fill incident from catalog."""
-    candidates = state.get("classification_candidates", [])
-
-    selection = _parse_input(interrupt("Esperando selección (1-3 o ninguno)"))["text"]
-
-    sel = selection.strip().lower()
-    selected = None
-
-    if sel in ("1", "2", "3"):
-        idx = int(sel) - 1
-        if idx < len(candidates):
-            selected = candidates[idx]
-    elif any(w in sel for w in ("ninguno", "none", "otro", "no")):
+    if confidence < 0.5 or not candidate.get("code"):
+        if attempts >= _MAX_CLASSIFY_ATTEMPTS:
+            return {
+                "messages": [AIMessage(content=_UNHANDLED_MSG)],
+                "current_node": "unhandled",
+                "classify_attempts": attempts,
+            }
         return {
             "messages": [
-                HumanMessage(content=selection),
                 AIMessage(
-                    content="Entendido. ¿Me puedes dar más detalles para ubicarlo mejor?"
-                ),
+                    content="No estoy seguro de qué tipo de incidente es. "
+                    "¿Me puedes dar más detalles?"
+                )
             ],
-            "current_node": "retry_description",
-            "awaiting_input": "incident_description",
-            "classification_candidates": [],
-            "selected_code": None,
+            "current_node": "classify_failed",
+            "classify_attempts": attempts,
         }
 
-    if not selected:
-        interpret_prompt = (
-            f'El usuario respondió: "{sel}" a estas opciones:\n'
-            + "\n".join(f"{i+1}. {c['code']} – {c['name']}" for i, c in enumerate(candidates))
-            + "\n¿Qué opción eligió? Responde SOLO con el número (1, 2, 3) o 'ninguno'."
-        )
-        resp = _get_llm().invoke([HumanMessage(content=interpret_prompt)])
-        choice = resp.content.strip()
-        if choice in ("1", "2", "3"):
-            idx = int(choice) - 1
-            if idx < len(candidates):
-                selected = candidates[idx]
-
-    if not selected:
-        return {
-            "messages": [
-                HumanMessage(content=selection),
-                AIMessage(
-                    content="No te entendí. ¿Me dices el número (1, 2 o 3) o *ninguno*?"
-                ),
-            ],
-            "current_node": "retry_classify",
-            "awaiting_input": "classification_selection",
-        }
-
-    code = selected["code"]
+    code = candidate["code"]
     template = _catalog_by_code.get(code)
     if not template:
+        if attempts >= _MAX_CLASSIFY_ATTEMPTS:
+            return {
+                "messages": [AIMessage(content=_UNHANDLED_MSG)],
+                "current_node": "unhandled",
+                "classify_attempts": attempts,
+            }
         return {
             "messages": [
-                HumanMessage(content=selection),
-                AIMessage(content=f"No encontré el código {code} en el catálogo. ¿Puedes elegir de nuevo?"),
+                AIMessage(
+                    content="No encontré ese código en el catálogo. "
+                    "¿Me puedes describir el problema con otras palabras?"
+                )
             ],
-            "current_node": "retry_classify",
-            "awaiting_input": "classification_selection",
+            "current_node": "classify_failed",
+            "classify_attempts": attempts,
         }
 
-    # Auto-fill from catalog + user description
+    # Auto-fill incident ALWAYS from the catalog template (never from LLM output)
+    # This ensures we never store hallucinated names or data
     incident = dict(state.get("current_incident", {}))
     incident.update({
         "incident_code": template.code,
-        "incident_name": template.name,
+        "incident_name": template.name,       # Always from catalog, never from LLM
         "category": template.category.value,
         "sub_category": template.sub_category,
         "severity": template.severity.value,
         "ticket_type": template.ticket_type.value,
         "sla": template.sla,
-        "description": state.get("user_description", ""),
+        "description": user_desc,
+        "date_time_reported": datetime.now().isoformat(),
+        "status": IncidentStatus.OPEN.value,
     })
 
-    # Determine missing required fields
-    missing = [f for f in REQUIRED_FIELDS if not incident.get(f)]
-
     return {
-        "messages": [
-            HumanMessage(content=selection),
-            AIMessage(
-                content=f"Perfecto: *{template.code}* – {template.name}\n"
-                f"Tipo: {template.ticket_type.value} · Severidad: {template.severity.value} · SLA: {template.sla}\n\n"
-                "Necesito unos datos más para completar el reporte."
-            ),
-        ],
         "current_incident": incident,
-        "selected_code": code,
-        "missing_fields": missing,
-        "current_field": missing[0] if missing else None,
-        "awaiting_input": f"field:{missing[0]}" if missing else None,
-        "current_node": "confirmed",
+        "current_node": "classify_ok",
+        "classify_attempts": attempts,
     }
 
 
-# ─── Collect Fields ────────────────────────────────────────────────────
-
-def collect_fields_node(state: dict) -> dict:
-    """Collect one missing field per invocation via interrupt.
-
-    The graph loops back here until all fields are filled.
-    Uses ``current_field`` and ``awaiting_input`` to guarantee
-    the answer is stored in the correct field.
-    """
-    missing = list(state.get("missing_fields", []))
-    incident = dict(state.get("current_incident", {}))
-
-    if not missing:
-        return {
-            "current_incident": incident,
-            "missing_fields": [],
-            "current_field": None,
-            "awaiting_input": None,
-            "current_node": "fields_done",
-        }
-
-    # Determine the field we are about to ask for.
-    target_field = state.get("current_field") or missing[0]
-    if target_field not in missing:
-        target_field = missing[0]
-
-    field_info = REQUIRED_FIELDS.get(target_field, {})
-
-    question = field_info.get("description", target_field)
-    if field_info.get("example"):
-        question += f"\n_(Ej: {field_info['example']})_"
-
-    # ── interrupt — graph pauses here ──
-    answer = _parse_input(interrupt(question))["text"]
-
-    # Store the answer in the field that was explicitly requested
-    incident[target_field] = answer.strip()
-    remaining = [f for f in missing if f != target_field]
-
-    # Prepare next field info for state so the next iteration knows
-    next_field = remaining[0] if remaining else None
-
-    return {
-        "messages": [AIMessage(content=question), HumanMessage(content=answer)],
-        "current_incident": incident,
-        "missing_fields": remaining,
-        "current_field": next_field,
-        "awaiting_input": f"field:{next_field}" if next_field else None,
-        "current_node": "collect_fields",
-    }
-
-
-# ─── Confirmation ──────────────────────────────────────────────────────
-
-def confirmation_node(state: dict) -> dict:
-    """Generate incident summary for user review. No interrupt."""
-    incident = dict(state.get("current_incident", {}))
-
-    if not incident.get("date_time_reported"):
-        incident["date_time_reported"] = datetime.now().isoformat()
-    if not incident.get("status"):
-        incident["status"] = IncidentStatus.OPEN.value
-
-    lines = [
-        "Listo, este es el resumen:\n",
-        f"*{incident.get('incident_code', '')}* – {incident.get('incident_name', '')}",
-        f"Tipo: {incident.get('ticket_type', 'Incidente')} · Severidad: {incident.get('severity', '')} · SLA: {incident.get('sla', '')}",
-        f"Agencia: {incident.get('agency', '')}",
-        f"Turno: {incident.get('shift', '')}",
-        f"Descripción: {incident.get('description', '')}",
-    ]
-
-    lines.append("\n¿Lo guardo así?\n1. Sí, guardar\n2. Quiero editar algo\n3. Cancelar")
-
-    return {
-        "messages": [AIMessage(content="\n".join(lines))],
-        "current_incident": incident,
-        "current_node": "confirmation",
-        "awaiting_input": "confirm_save",
-    }
-
-
-# ─── Process Confirmation ─────────────────────────────────────────────
-
-def process_confirmation_node(state: dict) -> dict:
-    """Interrupt to get confirm / edit / cancel."""
-    response = _parse_input(interrupt("Esperando confirmación (1=confirmar, 2=editar, 3=cancelar)"))["text"]
-    resp_lower = response.strip().lower()
-
-    affirm = any(w in resp_lower for w in ("sí", "si", "confirmo", "confirmar", "guardar", "ok", "1", "correcto"))
-    edit_kw = any(w in resp_lower for w in ("editar", "cambiar", "modificar", "corregir", "2"))
-
-    if affirm:
-        return {
-            "messages": [HumanMessage(content=response)],
-            "confirmed": True,
-            "current_node": "save",
-            "awaiting_input": None,
-        }
-    elif edit_kw:
-        return {
-            "messages": [
-                HumanMessage(content=response),
-                AIMessage(
-                    content="Dale, ¿qué dato corrijo? "
-                    "(agencia, descripción)"
-                ),
-            ],
-            "confirmed": False,
-            "current_node": "edit",
-            "awaiting_input": "edit_field_name",
-        }
-    else:
-        return {
-            "messages": [
-                HumanMessage(content=response),
-                AIMessage(
-                    content="Ok, cancelado. Si después necesitas reportar algo, aquí estoy."
-                ),
-            ],
-            "confirmed": False,
-            "current_node": "cancelled",
-            "awaiting_input": None,
-        }
-
-
-# ─── Edit ──────────────────────────────────────────────────────────────
-
-def edit_node(state: dict) -> dict:
-    """Interrupt to ask which field to edit, then route to collect_fields."""
-    field_input = _parse_input(interrupt("Esperando campo a editar"))["text"]
-
-    field = _FIELD_MAP.get(field_input.strip().lower())
-    if field:
-        return {
-            "messages": [HumanMessage(content=field_input)],
-            "missing_fields": [field],
-            "current_field": field,
-            "awaiting_input": f"field:{field}",
-            "current_node": "edit_ok",
-        }
-
-    return {
-        "messages": [
-            HumanMessage(content=field_input),
-            AIMessage(
-                content="No ubico ese campo. "
-                "Dime: agencia o descripción."
-            ),
-        ],
-        "current_node": "edit_retry",
-        "awaiting_input": "edit_field_name",
-    }
 
 
 # ─── Save ──────────────────────────────────────────────────────────────
 
 def save_node(state: dict) -> dict:
-    """Persist incident to DB and update user profile. No interrupt."""
+    """Persist incident to DB. No interrupt."""
     incident_data = state.get("current_incident", {})
 
     try:
@@ -574,6 +296,8 @@ def save_node(state: dict) -> dict:
         }
 
     conn = get_connection()
+    # Ensure user exists in DB to satisfy FK constraint
+    UserRepository(conn).ensure_exists(record.reported_by)
     repo = IncidentRepository(conn)
     incident_id = repo.save(record)
 
@@ -592,24 +316,15 @@ def save_node(state: dict) -> dict:
                     description=att.get("description", ""),
                 )
 
-    profile_data = state.get("user_profile")
-    if profile_data:
-        profile = UserProfile(**profile_data)
-        updated = False
-        if not profile.shift and record.shift:
-            profile.shift = record.shift
-            updated = True
-        if updated:
-            UserRepository(conn).upsert(profile)
-
     conn.close()
 
     return {
         "messages": [
             AIMessage(
-                content=f"Listo, quedó registrado con folio *{incident_id}*.\n"
-                f"{record.incident_code} – {record.incident_name} ({record.ticket_type.value} · Severidad: {record.severity.value})\n\n"
-                "Ya lo tiene el equipo. Si pasa algo más, mándame mensaje."
+                content=f"Listo, registré tu reporte con folio *{incident_id}* "
+                f"(*{record.incident_code}* – {record.incident_name}). "
+                "El equipo de soporte ya lo tiene y le dará seguimiento."
+                "Si el equipo sigue fallando o pasa algo más, escríbeme por aquí."
             )
         ],
         "current_node": "saved",

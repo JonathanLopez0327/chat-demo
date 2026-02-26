@@ -55,7 +55,11 @@ async def analyze_image(image_bytes: bytes, context: str = "") -> str:
         "Describe lo que ves en esta imagen en el contexto de un reporte "
         "de incidente en una agencia de lotería y apuestas. "
         "Identifica daños, equipos, condiciones de seguridad o cualquier "
-        "detalle relevante para el reporte."
+        "detalle relevante para el reporte.\n\n"
+        "IMPORTANTE: Si la imagen contiene contenido explícitamente violento, "
+        "gore, sexual, o completamente ajeno a operaciones de agencia, "
+        "NO describas el contenido en detalle. En su lugar responde únicamente: "
+        "\"[Contenido no relacionado con operaciones de agencia]\""
     )
     if context:
         prompt += f"\n\nContexto adicional del usuario: {context}"

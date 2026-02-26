@@ -35,6 +35,16 @@ class UserRepository:
         self.conn.commit()
         return cur.rowcount > 0
 
+    def ensure_exists(self, phone_number: str) -> None:
+        """Create a minimal user record if one doesn't exist yet."""
+        self.conn.execute(
+            """INSERT OR IGNORE INTO users (phone_number, name, created_at, updated_at)
+               VALUES (?, '', ?, ?)
+            """,
+            (phone_number, datetime.now().isoformat(), datetime.now().isoformat()),
+        )
+        self.conn.commit()
+
     def upsert(self, profile: UserProfile) -> None:
         self.conn.execute(
             """INSERT INTO users (phone_number, name, area, shift, role, created_at, updated_at)
@@ -114,6 +124,20 @@ class IncidentRepository:
             (status.value, incident_id),
         )
         self.conn.commit()
+
+    def delete_by_user(self, phone_number: str) -> int:
+        """Delete all incidents (and their attachments) for a user. Returns count deleted."""
+        # Delete attachments for this user's incidents first
+        self.conn.execute(
+            """DELETE FROM incident_attachments
+               WHERE incident_id IN (SELECT id FROM incidents WHERE reported_by = ?)""",
+            (phone_number,),
+        )
+        cur = self.conn.execute(
+            "DELETE FROM incidents WHERE reported_by = ?", (phone_number,)
+        )
+        self.conn.commit()
+        return cur.rowcount
 
 
 class AttachmentRepository:
