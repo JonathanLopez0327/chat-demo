@@ -14,6 +14,8 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 
 from src.config import CHECKPOINT_DB_PATH
+from src.db.engine import get_connection
+from src.db.repositories import ConversationLogRepository, UserRepository
 from src.graph.builder import build_graph
 from src.media.processor import (
     analyze_image,
@@ -62,12 +64,73 @@ class GraphAdapter:
         normalized = text.strip().lower().rstrip("!.?,;")
         return normalized in self._GREETING_PATTERNS
 
+    def _handle_command(self, text: str, thread_id: str) -> str | None:
+        """Check if *text* is a slash command and execute it.
+
+        Returns a response string if it was a command, or ``None`` to
+        continue with the normal LangGraph flow.
+        """
+        stripped = text.strip().lower()
+        if not stripped.startswith("/"):
+            return None
+
+        cmd = stripped.split()[0]
+        app_conn = get_connection()
+
+        if cmd == "/reset":
+            self.reset_thread(thread_id)
+            ConversationLogRepository(app_conn).delete_thread(thread_id)
+            app_conn.close()
+            return (
+                "Conversación reiniciada. Puedes empezar de nuevo enviando un mensaje."
+            )
+
+        if cmd == "/borrar":
+            self.reset_thread(thread_id)
+            ConversationLogRepository(app_conn).delete_thread(thread_id)
+            UserRepository(app_conn).delete(thread_id)
+            app_conn.close()
+            return (
+                "Tu perfil y conversación han sido eliminados. "
+                "Si envías un nuevo mensaje, comenzarás desde cero."
+            )
+
+        if cmd == "/eliminar_usuario":
+            UserRepository(app_conn).delete(thread_id)
+            app_conn.close()
+            return (
+                "Tu perfil ha sido eliminado de la base de datos. "
+                "La conversación actual sigue activa."
+            )
+
+        if cmd == "/ayuda":
+            app_conn.close()
+            return (
+                "Comandos disponibles:\n"
+                "  /reset — Reiniciar la conversación actual\n"
+                "  /borrar — Eliminar tu perfil y reiniciar el chat\n"
+                "  /eliminar_usuario — Eliminar solo tu perfil de la BD\n"
+                "  /ayuda — Mostrar esta lista de comandos"
+            )
+
+        app_conn.close()
+        return (
+            f"Comando desconocido: {cmd}\n"
+            "Envía /ayuda para ver los comandos disponibles."
+        )
+
     async def handle_message(self, msg: IncomingMessage) -> str:
         """Process an incoming WhatsApp message and return the reply text."""
         thread_id = msg.from_number
         config: dict[str, Any] = {
             "configurable": {"thread_id": thread_id}
         }
+
+        # Check for slash commands before touching the graph
+        if msg.text:
+            command_reply = self._handle_command(msg.text, thread_id)
+            if command_reply is not None:
+                return command_reply
 
         # Build the input value (text + optional media)
         input_value = await self._build_input(msg)

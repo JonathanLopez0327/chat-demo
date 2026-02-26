@@ -20,6 +20,14 @@ class UserRepository:
             return None
         return UserProfile(**dict(row))
 
+    def delete(self, phone_number: str) -> bool:
+        """Delete a user by phone number. Returns True if a row was deleted."""
+        cur = self.conn.execute(
+            "DELETE FROM users WHERE phone_number = ?", (phone_number,)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def upsert(self, profile: UserProfile) -> None:
         self.conn.execute(
             """INSERT INTO users (phone_number, name, area, shift, role, line, created_at, updated_at)
@@ -153,3 +161,10 @@ class ConversationLogRepository:
             (thread_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def delete_thread(self, thread_id: str) -> None:
+        """Delete all conversation log entries for a thread."""
+        self.conn.execute(
+            "DELETE FROM conversation_log WHERE thread_id = ?", (thread_id,)
+        )
+        self.conn.commit()
