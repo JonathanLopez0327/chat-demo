@@ -75,9 +75,10 @@ class IncidentRepository:
             """INSERT INTO incidents
                (incident_code, incident_name, category, sub_category, severity,
                 ticket_type, sla, date_time_reported, reported_by, agency,
-                shift, description, status, root_cause, corrective_action,
-                preventive_action, closed_by, closed_at, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                shift, location_text, latitude, longitude, description, status,
+                root_cause, corrective_action, preventive_action, closed_by,
+                closed_at, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 record.incident_code,
@@ -91,6 +92,9 @@ class IncidentRepository:
                 record.reported_by,
                 record.agency,
                 record.shift,
+                record.location_text,
+                record.latitude,
+                record.longitude,
                 record.description,
                 record.status.value,
                 record.root_cause,

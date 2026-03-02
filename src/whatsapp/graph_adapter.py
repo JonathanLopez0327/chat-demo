@@ -324,6 +324,14 @@ class GraphAdapter:
                     "bytes": image_bytes,
                 }
             )
+        elif msg.type == "location" and msg.latitude is not None and msg.longitude is not None:
+            location_data = {
+                "latitude": msg.latitude,
+                "longitude": msg.longitude,
+                "name": msg.location_name or "",
+                "address": msg.location_address or "",
+            }
+            return {"text": msg.text or "", "media": media_items, "location": location_data}
         else:
             text = msg.text or ""
 

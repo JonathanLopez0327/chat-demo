@@ -68,6 +68,32 @@ def _required_info_demands_media(required_info: str) -> bool:
     return any(marker in text for marker in media_markers)
 
 
+def _required_info_demands_location(required_info: str) -> bool:
+    """Heuristic: required info text explicitly asks for GPS location/pin."""
+    text = str(required_info or "").strip().lower()
+    if not text:
+        return False
+    location_markers = (
+        "ubicacion",
+        "ubicación",
+        "gps",
+        "coordenada",
+        "pin",
+        "localizacion",
+        "localización",
+        "share location",
+    )
+    return any(marker in text for marker in location_markers)
+
+
+def _has_location_data(incident: dict) -> bool:
+    """Return True if incident has valid latitude/longitude."""
+    return (
+        incident.get("latitude") is not None
+        and incident.get("longitude") is not None
+    )
+
+
 def _missing_requirements(
     incident: dict,
     media_items: list[dict],
@@ -78,9 +104,13 @@ def _missing_requirements(
 
     if _required_info_demands_media(required_info) and not _has_required_media(media_items):
         pending.append("Adjunta una imagen o documento relacionado con la incidencia.")
+    if _required_info_demands_location(required_info) and not _has_location_data(incident):
+        pending.append(
+            "Comparte tu ubicación como pin GPS de WhatsApp para continuar."
+        )
 
     notes = str(incident.get("required_evidence_notes", "") or "").strip()
-    if required_info and not notes:
+    if required_info and not notes and not _required_info_demands_location(required_info):
         pending.append(f"Comparte esta información adicional: {required_info}")
 
     return pending
@@ -98,8 +128,9 @@ def _parse_input(raw: object) -> dict:
         return {
             "text": raw.get("text", ""),
             "media": raw.get("media", []),
+            "location": raw.get("location"),
         }
-    return {"text": str(raw), "media": []}
+    return {"text": str(raw), "media": [], "location": None}
 
 
 # ─── Greeting ──────────────────────────────────────────────────────────
@@ -138,6 +169,7 @@ def collect_description_node(state: dict) -> dict:
 
     description = parsed["text"]
     media_attachments = list(state.get("media_attachments", []))
+    location_data = parsed.get("location")
 
     extra_parts: list[str] = []
     for m in parsed.get("media", []):
@@ -155,6 +187,7 @@ def collect_description_node(state: dict) -> dict:
         "messages": [HumanMessage(content=display_text)],
         "user_description": description,
         "media_attachments": media_attachments,
+        "location_data": location_data or {},
         "current_node": "collect_description",
     }
 
@@ -295,6 +328,18 @@ def classify_node(state: dict) -> dict:
         "date_time_reported": datetime.now().isoformat(),
         "status": IncidentStatus.OPEN.value,
     })
+    if state.get("location_data"):
+        location_data = state.get("location_data", {})
+        incident.update({
+            "location_text": ", ".join(
+                part for part in [
+                    str(location_data.get("name", "") or "").strip(),
+                    str(location_data.get("address", "") or "").strip(),
+                ] if part
+            ),
+            "latitude": location_data.get("latitude"),
+            "longitude": location_data.get("longitude"),
+        })
 
     pending_requirements = _missing_requirements(
         incident=incident,
@@ -333,6 +378,16 @@ def collect_required_evidence_node(state: dict) -> dict:
         media_attachments.append(m)
 
     incident = dict(state.get("current_incident", {}))
+    location_data = parsed.get("location")
+    if location_data and location_data.get("latitude") is not None and location_data.get("longitude") is not None:
+        incident["latitude"] = location_data.get("latitude")
+        incident["longitude"] = location_data.get("longitude")
+        incident["location_text"] = ", ".join(
+            part for part in [
+                str(location_data.get("name", "") or "").strip(),
+                str(location_data.get("address", "") or "").strip(),
+            ] if part
+        )
     user_text = str(parsed.get("text", "") or "").strip()
     if user_text:
         prev = str(incident.get("required_evidence_notes", "") or "").strip()
@@ -353,6 +408,7 @@ def collect_required_evidence_node(state: dict) -> dict:
             "messages": [AIMessage(content=requirements_msg)],
             "current_incident": incident,
             "media_attachments": media_attachments,
+            "location_data": location_data or state.get("location_data", {}),
             "requirements_pending": pending_requirements,
             "requirements_collected": False,
             "current_node": "requirements_needed",
@@ -363,6 +419,7 @@ def collect_required_evidence_node(state: dict) -> dict:
         "messages": messages,
         "current_incident": incident,
         "media_attachments": media_attachments,
+        "location_data": location_data or state.get("location_data", {}),
         "requirements_pending": [],
         "requirements_collected": True,
         "current_node": "requirements_ok",
@@ -395,6 +452,9 @@ def save_node(state: dict) -> dict:
             reported_by=incident_data.get("reported_by", ""),
             agency=incident_data.get("agency", ""),
             shift=incident_data.get("shift", ""),
+            location_text=incident_data.get("location_text", ""),
+            latitude=incident_data.get("latitude"),
+            longitude=incident_data.get("longitude"),
             description=description,
             status=IncidentStatus.OPEN,
         )
@@ -439,7 +499,7 @@ def save_node(state: dict) -> dict:
                 content=f"Listo, registré tu reporte con folio *{incident_id}* "
                 f"(*{record.incident_code}* – {record.incident_name}). "
                 "El equipo de soporte ya lo tiene y le dará seguimiento."
-                "Si el equipo sigue fallando o pasa algo más, escríbeme por aquí."
+                "\n\nSi el equipo sigue fallando o pasa algo más, escríbeme por aquí."
             )
         ],
         "current_node": "saved",

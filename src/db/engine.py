@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS incidents (
     reported_by        TEXT NOT NULL REFERENCES users(phone_number),
     agency             TEXT DEFAULT '',
     shift              TEXT DEFAULT '',
+    location_text      TEXT DEFAULT '',
+    latitude           REAL,
+    longitude          REAL,
     description        TEXT DEFAULT '',
     status             TEXT NOT NULL DEFAULT 'OPEN',
     root_cause         TEXT,
@@ -94,6 +97,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "ALTER TABLE conversation_log ADD COLUMN conversation_id TEXT REFERENCES conversations(id)"
         )
         conn.commit()
+
+    incident_cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(incidents)").fetchall()
+    }
+    if "location_text" not in incident_cols:
+        conn.execute("ALTER TABLE incidents ADD COLUMN location_text TEXT DEFAULT ''")
+    if "latitude" not in incident_cols:
+        conn.execute("ALTER TABLE incidents ADD COLUMN latitude REAL")
+    if "longitude" not in incident_cols:
+        conn.execute("ALTER TABLE incidents ADD COLUMN longitude REAL")
+    conn.commit()
 
 
 def init_db(db_path: Path | str | None = None) -> None:

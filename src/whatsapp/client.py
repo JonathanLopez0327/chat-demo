@@ -17,10 +17,14 @@ GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
 class IncomingMessage:
     from_number: str
     message_id: str
-    type: str  # "text" | "image" | "audio"
+    type: str  # "text" | "image" | "audio" | "location"
     text: str | None = None
     media_id: str | None = None
     mime_type: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    location_name: str | None = None
+    location_address: str | None = None
     timestamp: str = ""
 
 
@@ -94,6 +98,12 @@ def parse_webhook_message(payload: dict) -> list[IncomingMessage]:
                     aud = msg.get("audio", {})
                     incoming.media_id = aud.get("id")
                     incoming.mime_type = aud.get("mime_type")
+                elif msg_type == "location":
+                    loc = msg.get("location", {})
+                    incoming.latitude = loc.get("latitude")
+                    incoming.longitude = loc.get("longitude")
+                    incoming.location_name = loc.get("name")
+                    incoming.location_address = loc.get("address")
                 else:
                     # Unsupported type – skip
                     continue

@@ -108,6 +108,9 @@ class IncidentRecord(BaseModel):
     reported_by: str  # phone_number FK
     agency: str = ""
     shift: str = ""
+    location_text: str = ""
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     description: str = ""
     status: IncidentStatus = IncidentStatus.OPEN
     root_cause: Optional[str] = None
