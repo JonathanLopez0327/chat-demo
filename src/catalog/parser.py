@@ -156,7 +156,8 @@ def parse_catalog(catalog_path: Path | str) -> list[IncidentTemplate]:
         requires_image_bool = bool(
             requires_image and str(requires_image).strip().lower() in ("sí", "si", "yes", "true", "1")
         )
-        required_info = str(required_info_raw or "").strip() if requires_image_bool else ""
+        # Keep required_info independent from requires_image flag.
+        required_info = str(required_info_raw or "").strip()
 
         templates.append(IncidentTemplate(
             code=code,

@@ -47,16 +47,38 @@ def _has_required_media(media_items: list[dict]) -> bool:
     return False
 
 
+def _required_info_demands_media(required_info: str) -> bool:
+    """Heuristic: required info text explicitly asks for image/document evidence."""
+    text = str(required_info or "").strip().lower()
+    if not text:
+        return False
+    media_markers = (
+        "imagen",
+        "foto",
+        "fotografia",
+        "fotografía",
+        "captura",
+        "screenshot",
+        "documento",
+        "adjunto",
+        "evidencia",
+        "archivo",
+        "pdf",
+    )
+    return any(marker in text for marker in media_markers)
+
+
 def _missing_requirements(
     incident: dict,
     media_items: list[dict],
 ) -> list[str]:
     """Compute pending requirements based on catalog metadata."""
     pending: list[str] = []
-    if incident.get("requires_image") and not _has_required_media(media_items):
+    required_info = str(incident.get("required_info", "") or "").strip()
+
+    if _required_info_demands_media(required_info) and not _has_required_media(media_items):
         pending.append("Adjunta una imagen o documento relacionado con la incidencia.")
 
-    required_info = str(incident.get("required_info", "") or "").strip()
     notes = str(incident.get("required_evidence_notes", "") or "").strip()
     if required_info and not notes:
         pending.append(f"Comparte esta información adicional: {required_info}")
