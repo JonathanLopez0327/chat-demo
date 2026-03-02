@@ -63,6 +63,7 @@ class IncidentTemplate(BaseModel):
     ticket_type: TicketType = TicketType.INCIDENTE
     sla: str = ""
     requires_image: bool = False
+    required_info: str = ""
 
 
 # ── User profile ───────────────────────────────────────────────────────

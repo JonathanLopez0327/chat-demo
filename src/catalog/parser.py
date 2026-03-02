@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
+import unicodedata
 
 from openpyxl import load_workbook
 
@@ -47,6 +48,57 @@ _TICKET_TYPE_MAP: dict[str, TicketType] = {
     "reclamo": TicketType.RECLAMO,
 }
 
+_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
+    "category": ("categoria",),
+    "sub_category": ("subcategoria",),
+    "ticket_type": ("tipo de ticket",),
+    "description": (
+        "descripcion corta (catalogo)",
+        "descripcion corta",
+        "descripcion",
+    ),
+    "severity": ("severidad",),
+    "sla": ("sla sugerido", "sla"),
+    "requires_image": ("lleva imagen o documento?", "lleva imagen o documento"),
+    "required_info": (
+        "informacion o documento requerido",
+        "informacion requerida",
+    ),
+}
+
+
+def _normalize_header(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return " ".join(text.split())
+
+
+def _header_index_map(header_row: tuple[object, ...]) -> dict[str, int]:
+    normalized = {_normalize_header(cell): idx for idx, cell in enumerate(header_row) if cell is not None}
+    indexes: dict[str, int] = {}
+
+    for field, aliases in _HEADER_ALIASES.items():
+        for alias in aliases:
+            idx = normalized.get(alias)
+            if idx is not None:
+                indexes[field] = idx
+                break
+
+    required = ("category", "description")
+    missing = [key for key in required if key not in indexes]
+    if missing:
+        raise ValueError(f"Missing required catalog columns: {', '.join(missing)}")
+
+    return indexes
+
+
+def _cell(row: tuple[object, ...], idx_map: dict[str, int], key: str) -> object:
+    idx = idx_map.get(key)
+    if idx is None or idx >= len(row):
+        return None
+    return row[idx]
+
 
 def _parse_severity(raw: str) -> Severity:
     normalized = raw.strip().lower().split("(")[0].strip()
@@ -71,11 +123,23 @@ def parse_catalog(catalog_path: Path | str) -> list[IncidentTemplate]:
 
     templates: list[IncidentTemplate] = []
     counters: dict[str, int] = defaultdict(int)
+    header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+    if not header_row:
+        wb.close()
+        return templates
+    idx_map = _header_index_map(header_row)
 
     for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row or len(row) < 7:
+        if not row:
             continue
-        cat_raw, sub_cat, ticket_type_raw, description, severity_raw, sla, requires_image = row[:7]
+        cat_raw = _cell(row, idx_map, "category")
+        sub_cat = _cell(row, idx_map, "sub_category")
+        ticket_type_raw = _cell(row, idx_map, "ticket_type")
+        description = _cell(row, idx_map, "description")
+        severity_raw = _cell(row, idx_map, "severity")
+        sla = _cell(row, idx_map, "sla")
+        requires_image = _cell(row, idx_map, "requires_image")
+        required_info_raw = _cell(row, idx_map, "required_info")
 
         if not cat_raw or not description:
             continue
@@ -89,6 +153,11 @@ def parse_catalog(catalog_path: Path | str) -> list[IncidentTemplate]:
             TicketType.INCIDENTE,
         )
 
+        requires_image_bool = bool(
+            requires_image and str(requires_image).strip().lower() in ("sí", "si", "yes", "true", "1")
+        )
+        required_info = str(required_info_raw or "").strip() if requires_image_bool else ""
+
         templates.append(IncidentTemplate(
             code=code,
             category=category,
@@ -98,7 +167,8 @@ def parse_catalog(catalog_path: Path | str) -> list[IncidentTemplate]:
             severity=_parse_severity(str(severity_raw or "Media")),
             ticket_type=ticket_type,
             sla=str(sla or "").strip(),
-            requires_image=bool(requires_image and str(requires_image).strip().lower() in ("sí", "si", "yes", "true", "1")),
+            requires_image=requires_image_bool,
+            required_info=required_info,
         ))
 
     wb.close()
@@ -135,6 +205,10 @@ def load_catalog_text(catalog_path: Path | str) -> str:
         lines.append(f"- **Tipo de ticket:** {t.ticket_type.value}")
         lines.append(f"- **Severidad:** {t.severity.value}")
         lines.append(f"- **SLA:** {t.sla}")
+        if t.requires_image:
+            lines.append("- **Requiere imagen/documento:** Sí")
+            if t.required_info:
+                lines.append(f"- **Información/documento requerido:** {t.required_info}")
         lines.append("")
 
     return "\n".join(lines)
