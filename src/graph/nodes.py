@@ -1,11 +1,4 @@
-"""LangGraph node functions for the simplified incident reporting flow.
-
-4 nodes, 1 user interaction:
-1. greeting_node      — saludo genérico (no interrupt)
-2. collect_description — recibe descripción del usuario (interrupt)
-3. classify_node      — clasifica automáticamente con LLM (no interrupt)
-4. save_node          — guarda en BD (no interrupt)
-"""
+"""LangGraph node functions for incident reporting flow."""
 from __future__ import annotations
 
 import json
@@ -43,6 +36,32 @@ def _get_llm() -> ChatOpenAI:
 _catalog_templates = parse_catalog(CATALOG_PATH)
 _catalog_by_code = {t.code: t for t in _catalog_templates}
 _catalog_text = load_catalog_text(CATALOG_PATH)
+
+
+def _has_required_media(media_items: list[dict]) -> bool:
+    """Return True if at least one supported evidence attachment is present."""
+    for item in media_items:
+        media_type = str(item.get("type", "")).strip().lower()
+        if media_type in {"image", "document"}:
+            return True
+    return False
+
+
+def _missing_requirements(
+    incident: dict,
+    media_items: list[dict],
+) -> list[str]:
+    """Compute pending requirements based on catalog metadata."""
+    pending: list[str] = []
+    if incident.get("requires_image") and not _has_required_media(media_items):
+        pending.append("Adjunta una imagen o documento relacionado con la incidencia.")
+
+    required_info = str(incident.get("required_info", "") or "").strip()
+    notes = str(incident.get("required_evidence_notes", "") or "").strip()
+    if required_info and not notes:
+        pending.append(f"Comparte esta información adicional: {required_info}")
+
+    return pending
 
 
 def _parse_input(raw: object) -> dict:
@@ -248,15 +267,83 @@ def classify_node(state: dict) -> dict:
         "severity": template.severity.value,
         "ticket_type": template.ticket_type.value,
         "sla": template.sla,
+        "requires_image": template.requires_image,
+        "required_info": template.required_info,
         "description": user_desc,
         "date_time_reported": datetime.now().isoformat(),
         "status": IncidentStatus.OPEN.value,
     })
 
+    pending_requirements = _missing_requirements(
+        incident=incident,
+        media_items=state.get("media_attachments", []),
+    )
+    if pending_requirements:
+        requirements_msg = (
+            "Antes de generar el ticket necesito completar estos datos:\n- "
+            + "\n- ".join(pending_requirements)
+        )
+        return {
+            "messages": [AIMessage(content=requirements_msg)],
+            "current_incident": incident,
+            "requirements_pending": pending_requirements,
+            "requirements_collected": False,
+            "current_node": "requirements_needed",
+            "classify_attempts": attempts,
+        }
+
     return {
         "current_incident": incident,
+        "requirements_pending": [],
+        "requirements_collected": True,
         "current_node": "classify_ok",
         "classify_attempts": attempts,
+    }
+
+
+def collect_required_evidence_node(state: dict) -> dict:
+    """Interrupt to collect required evidence/info for selected catalog incident."""
+    raw = interrupt("Esperando evidencia o información adicional requerida")
+    parsed = _parse_input(raw)
+
+    media_attachments = list(state.get("media_attachments", []))
+    for m in parsed.get("media", []):
+        media_attachments.append(m)
+
+    incident = dict(state.get("current_incident", {}))
+    user_text = str(parsed.get("text", "") or "").strip()
+    if user_text:
+        prev = str(incident.get("required_evidence_notes", "") or "").strip()
+        incident["required_evidence_notes"] = (
+            f"{prev}\n{user_text}".strip() if prev else user_text
+        )
+
+    pending_requirements = _missing_requirements(
+        incident=incident,
+        media_items=media_attachments,
+    )
+    if pending_requirements:
+        requirements_msg = (
+            "Todavía falta completar lo siguiente para registrar el ticket:\n- "
+            + "\n- ".join(pending_requirements)
+        )
+        return {
+            "messages": [AIMessage(content=requirements_msg)],
+            "current_incident": incident,
+            "media_attachments": media_attachments,
+            "requirements_pending": pending_requirements,
+            "requirements_collected": False,
+            "current_node": "requirements_needed",
+        }
+
+    messages = [HumanMessage(content=user_text)] if user_text else []
+    return {
+        "messages": messages,
+        "current_incident": incident,
+        "media_attachments": media_attachments,
+        "requirements_pending": [],
+        "requirements_collected": True,
+        "current_node": "requirements_ok",
     }
 
 
@@ -267,6 +354,12 @@ def classify_node(state: dict) -> dict:
 def save_node(state: dict) -> dict:
     """Persist incident to DB. No interrupt."""
     incident_data = state.get("current_incident", {})
+    description = incident_data.get("description", "")
+    required_notes = str(incident_data.get("required_evidence_notes", "") or "").strip()
+    if required_notes:
+        description = (
+            f"{description}\n\nInformación adicional requerida:\n{required_notes}"
+        ).strip()
 
     try:
         record = IncidentRecord(
@@ -280,7 +373,7 @@ def save_node(state: dict) -> dict:
             reported_by=incident_data.get("reported_by", ""),
             agency=incident_data.get("agency", ""),
             shift=incident_data.get("shift", ""),
-            description=incident_data.get("description", ""),
+            description=description,
             status=IncidentStatus.OPEN,
         )
     except Exception as e:

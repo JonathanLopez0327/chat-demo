@@ -17,3 +17,5 @@ class ConversationState(TypedDict):
     error: Optional[str]
     media_attachments: list[dict]   # [{bytes, filename, type, description}]
     classify_attempts: int          # number of classification attempts (for retry limit)
+    requirements_pending: list[str]  # pending required evidence/info from catalog
+    requirements_collected: bool     # whether required evidence/info is complete
